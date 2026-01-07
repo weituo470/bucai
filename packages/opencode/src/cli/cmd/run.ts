@@ -11,6 +11,7 @@ import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2"
 import { Server } from "../../server/server"
 import { Provider } from "../../provider/provider"
 import { Agent } from "../../agent/agent"
+import { Disambiguation } from "@/disambiguation"
 
 const TOOL: Record<string, [string, string]> = {
   todowrite: ["Todo", UI.Style.TEXT_WARNING_BOLD],
@@ -91,6 +92,26 @@ export const RunCommand = cmd({
         type: "string",
         describe: "model variant (provider-specific reasoning effort, e.g., high, max, minimal)",
       })
+      .option("disambiguate", {
+        type: "boolean",
+        default: true,
+        describe: "enable ambiguity disambiguation for prompts",
+      })
+      .option("disambiguate-countdown", {
+        type: "number",
+        default: 3000,
+        describe: "countdown (ms) before auto-selecting the top candidate",
+      })
+      .option("disambiguate-max-batch", {
+        type: "number",
+        default: 10,
+        describe: "maximum number of lines to treat as a batch",
+      })
+      .option("disambiguate-max-candidates", {
+        type: "number",
+        default: 5,
+        describe: "maximum number of candidates to generate",
+      })
   },
   handler: async (args) => {
     let message = [...args.message, ...(args["--"] || [])]
@@ -131,6 +152,95 @@ export const RunCommand = cmd({
     if (message.trim().length === 0 && !args.command) {
       UI.error("You must provide a message or a command")
       process.exit(1)
+    }
+
+    const disambiguateCountdownMs = Number(args.disambiguateCountdown) || 3000
+    const disambiguateMaxBatch = Number(args.disambiguateMaxBatch) || 10
+    const disambiguateMaxCandidates = Number(args.disambiguateMaxCandidates) || 5
+
+    const selectWithCountdown = async (result: Disambiguation.AmbiguousResult) => {
+      const candidates = result.candidates.map((c) => c.text).slice(0, disambiguateMaxCandidates)
+      if (candidates.length === 0) return result.cleaned
+
+      UI.println(UI.Style.TEXT_WARNING_BOLD + "! ", UI.Style.TEXT_NORMAL + "Ambiguous instruction detected")
+      UI.println(UI.Style.TEXT_DIM + "Input:  " + UI.Style.TEXT_NORMAL + result.original)
+      if (result.cleaned !== result.original) UI.println(UI.Style.TEXT_DIM + "Clean:  " + UI.Style.TEXT_NORMAL + result.cleaned)
+
+      for (const slot of result.slots) {
+        const color = slot.level === "high" ? UI.Style.TEXT_DANGER_BOLD : UI.Style.TEXT_WARNING_BOLD
+        const joined = slot.options.map((o) => o.label).join(" / ")
+        UI.println(color + (slot.level === "high" ? "● " : "○ ") + UI.Style.TEXT_NORMAL + `${slot.label}: ${joined}`)
+      }
+
+      UI.println(UI.Style.TEXT_DIM + `Select 1-${candidates.length} within ${Math.ceil(disambiguateCountdownMs / 1000)}s (or wait):`)
+      candidates.forEach((c, i) => {
+        UI.println(UI.Style.TEXT_DIM + `  ${i + 1}. ` + UI.Style.TEXT_NORMAL + c)
+      })
+
+      const stdin = process.stdin
+      if (!stdin.isTTY || typeof (stdin as any).setRawMode !== "function") {
+        return candidates[0]!
+      }
+
+      return await new Promise<string>((resolve) => {
+        const defaultValue = candidates[0]!
+        let settled = false
+        const previousRawMode = (stdin as any).isRaw
+        let timeout: NodeJS.Timeout | undefined
+
+        const settle = (value: string) => {
+          if (settled) return
+          settled = true
+          cleanup()
+          resolve(value)
+        }
+
+        const cleanup = () => {
+          if (timeout) clearTimeout(timeout)
+          stdin.off("data", onData)
+          try {
+            stdin.setRawMode(Boolean(previousRawMode))
+          } catch {}
+          stdin.pause()
+        }
+
+        const onData = (chunk: Buffer | string) => {
+          const input = chunk.toString()
+          if (input.includes("\u0003")) {
+            cleanup()
+            process.exit(130)
+          }
+          if (input === "\r" || input === "\n") return settle(defaultValue)
+          if (input === "\u001b") return settle(result.cleaned)
+
+          const digit = Number.parseInt(input, 10)
+          if (Number.isFinite(digit) && digit >= 1 && digit <= candidates.length) {
+            return settle(candidates[digit - 1]!)
+          }
+        }
+
+        stdin.setEncoding("utf8")
+        stdin.setRawMode(true)
+        stdin.resume()
+        stdin.on("data", onData)
+
+        timeout = setTimeout(() => settle(defaultValue), disambiguateCountdownMs)
+      })
+    }
+
+    if (!args.command && args.disambiguate !== false && process.stdin.isTTY) {
+      const analyzed = Disambiguation.analyze(message, {
+        maxBatch: disambiguateMaxBatch,
+        maxCandidates: disambiguateMaxCandidates,
+      })
+
+      if (analyzed.kind === "none") {
+        message = analyzed.cleaned
+      } else if (analyzed.kind === "batch_resolved") {
+        message = analyzed.resolvedLines.join("\n")
+      } else if (analyzed.kind === "ambiguous") {
+        message = await selectWithCountdown(analyzed)
+      }
     }
 
     const execute = async (sdk: OpencodeClient, sessionID: string) => {

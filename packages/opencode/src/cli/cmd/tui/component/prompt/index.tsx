@@ -27,9 +27,15 @@ import { createColors, createFrames } from "../../ui/spinner.ts"
 import { useDialog } from "@tui/ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
 import { DialogAlert } from "../../ui/dialog-alert"
+import { DialogDisambiguate } from "../../ui/dialog-disambiguate"
+import { DialogRewrite } from "../../ui/dialog-rewrite"
+import { DialogPrompt } from "@tui/ui/dialog-prompt"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
 import { useTextareaKeybindings } from "../textarea-keybindings"
+import { Disambiguation } from "@/disambiguation"
+import { Rewrite } from "@/rewrite"
+import { Log } from "@/util/log"
 
 export type PromptProps = {
   sessionID?: string
@@ -72,6 +78,74 @@ export function Prompt(props: PromptProps) {
   const renderer = useRenderer()
   const { theme, syntax } = useTheme()
   const kv = useKV()
+  const debugInput = process.env.OPENCODE_DEBUG_INPUT === "1"
+
+  const disambiguationConfig = createMemo(() => {
+    return (sync.data.config as any)?.experimental?.disambiguation ?? {}
+  })
+
+  const disambiguationEnabled = createMemo(() => {
+    return kv.get("disambiguation_enabled", disambiguationConfig().enabled ?? false)
+  })
+
+  const disambiguationCountdownMs = createMemo(() => {
+    return kv.get("disambiguation_countdown_ms", disambiguationConfig().countdown_ms ?? 3000)
+  })
+
+  const rewriteConfig = createMemo(() => {
+    const cfg = (disambiguationConfig() as any)?.rewrite ?? {}
+    const envUrl = process.env.OPENCODE_REWRITE_URL
+    const envModel = process.env.OPENCODE_REWRITE_MODEL
+    const envTimeout = process.env.OPENCODE_REWRITE_TIMEOUT_MS
+    return {
+      ...cfg,
+      url: envUrl ?? cfg.url,
+      model: envModel ?? cfg.model,
+      timeout_ms: envTimeout ? Number.parseInt(envTimeout, 10) : cfg.timeout_ms,
+    }
+  })
+
+  const rewriteEnabled = createMemo(() => {
+    const cfg = rewriteConfig()
+    return Boolean(kv.get("rewrite_enabled", cfg.enabled ?? false))
+  })
+
+  const rewriteMode = createMemo(() => {
+    const cfg = rewriteConfig()
+    return cfg.url && cfg.model ? ("external" as const) : ("default_model" as const)
+  })
+
+  const rewritePreview = createMemo(() => {
+    const cfg = rewriteConfig()
+    return kv.get("rewrite_preview", cfg.preview ?? false)
+  })
+
+  const rewriteCountdownMs = createMemo(() => {
+    const cfg = rewriteConfig()
+    return kv.get("rewrite_countdown_ms", cfg.countdown_ms ?? disambiguationCountdownMs())
+  })
+
+  const rewriteApiKey = createMemo(() => {
+    const cfg = rewriteConfig()
+    if (process.env.OPENCODE_REWRITE_API_KEY) return process.env.OPENCODE_REWRITE_API_KEY
+    const envName = cfg.api_key_env ?? "OPENCODE_REWRITE_API_KEY"
+    if (typeof envName === "string" && envName.length > 0) return (process.env as any)[envName]
+    return undefined
+  })
+
+  onMount(() => {
+    if (!debugInput) return
+    Log.Default.info("prompt.debug.enabled", {
+      log: Log.file(),
+      input_submit: (sync.data.config as any)?.keybinds?.input_submit,
+      input_newline: (sync.data.config as any)?.keybinds?.input_newline,
+      rewrite_enabled: rewriteEnabled(),
+      rewrite_mode: rewriteMode(),
+      rewrite_url: rewriteConfig().url ? "set" : "unset",
+      rewrite_model: rewriteConfig().model ? "set" : "unset",
+      rewrite_preview: rewritePreview(),
+    })
+  })
 
   function promptModelWarning() {
     toast.show({
@@ -307,6 +381,91 @@ export function Prompt(props: PromptProps) {
           input.cursorOffset = Bun.stringWidth(content)
         },
       },
+      {
+        title: disambiguationEnabled() ? "Disable disambiguation" : "Enable disambiguation",
+        value: "prompt.disambiguation.toggle",
+        category: "Prompt",
+        suggested: true,
+        onSelect: (dialog) => {
+          const next = !disambiguationEnabled()
+          kv.set("disambiguation_enabled", next)
+          toast.show({
+            variant: "info",
+            message: `Disambiguation ${next ? "enabled" : "disabled"}`,
+            duration: 2000,
+          })
+          dialog.clear()
+        },
+      },
+      {
+        title: `Disambiguation countdown (${Math.round(disambiguationCountdownMs() / 1000)}s)`,
+        value: "prompt.disambiguation.countdown",
+        category: "Prompt",
+        onSelect: async (dialog) => {
+          const current = disambiguationCountdownMs()
+          const value = await DialogPrompt.show(dialog, "Disambiguation countdown (ms)", {
+            value: String(current),
+            placeholder: "3000",
+          })
+          if (value === null) return
+          const next = Number.parseInt(value.trim(), 10)
+          if (!Number.isFinite(next) || next <= 0) {
+            toast.show({ variant: "error", message: "Invalid countdown value", duration: 2500 })
+            return
+          }
+          kv.set("disambiguation_countdown_ms", next)
+          toast.show({ variant: "info", message: `Countdown set to ${next}ms`, duration: 2000 })
+        },
+      },
+      {
+        title: rewriteEnabled() ? "Disable rewrite" : "Enable rewrite",
+        value: "prompt.rewrite.toggle",
+        category: "Prompt",
+        onSelect: (dialog) => {
+          const cfg = rewriteConfig()
+          const next = !kv.get("rewrite_enabled", cfg.enabled ?? false)
+          kv.set("rewrite_enabled", next)
+          toast.show({
+            variant: "info",
+            message: next
+              ? `Rewrite enabled (${rewriteMode() === "default_model" ? "uses current model" : "uses external endpoint"})`
+              : "Rewrite disabled",
+            duration: 2500,
+          })
+          dialog.clear()
+        },
+      },
+      {
+        title: rewritePreview() ? "Disable rewrite preview" : "Enable rewrite preview",
+        value: "prompt.rewrite.preview",
+        category: "Prompt",
+        onSelect: (dialog) => {
+          const next = !rewritePreview()
+          kv.set("rewrite_preview", next)
+          toast.show({ variant: "info", message: `Rewrite preview ${next ? "enabled" : "disabled"}`, duration: 2000 })
+          dialog.clear()
+        },
+      },
+      {
+        title: `Rewrite countdown (${Math.round(rewriteCountdownMs() / 1000)}s)`,
+        value: "prompt.rewrite.countdown",
+        category: "Prompt",
+        onSelect: async (dialog) => {
+          const current = rewriteCountdownMs()
+          const value = await DialogPrompt.show(dialog, "Rewrite countdown (ms)", {
+            value: String(current),
+            placeholder: String(disambiguationCountdownMs()),
+          })
+          if (value === null) return
+          const next = Number.parseInt(value.trim(), 10)
+          if (!Number.isFinite(next) || next <= 0) {
+            toast.show({ variant: "error", message: "Invalid countdown value", duration: 2500 })
+            return
+          }
+          kv.set("rewrite_countdown_ms", next)
+          toast.show({ variant: "info", message: `Rewrite countdown set to ${next}ms`, duration: 2000 })
+        },
+      },
     ]
   })
 
@@ -488,8 +647,28 @@ export function Prompt(props: PromptProps) {
   async function submit() {
     if (props.disabled) return
     if (autocomplete?.visible) return
-    if (!store.prompt.input) return
-    const trimmed = store.prompt.input.trim()
+    let currentInput = input.plainText
+    if (!currentInput) {
+      // IME/terminal edge case: allow a tick for pending text to flush into the textarea buffer.
+      await new Promise((r) => setTimeout(r, 0))
+      currentInput = input.plainText
+      if (!currentInput) return
+    }
+
+    // Keep store in sync even if onContentChange didn't run yet (e.g. IME/terminal edge cases)
+    if (store.prompt.input !== currentInput) {
+      setStore("prompt", "input", currentInput)
+    }
+
+    if (debugInput) {
+      Log.Default.info("prompt.submit", {
+        length: currentInput.length,
+        hasNonAscii: /[^\x00-\x7F]/.test(currentInput),
+        preview: currentInput.slice(0, 80),
+      })
+    }
+
+    const trimmed = currentInput.trim()
     if (trimmed === "exit" || trimmed === "quit" || trimmed === ":q") {
       exit()
       return
@@ -499,14 +678,14 @@ export function Prompt(props: PromptProps) {
       promptModelWarning()
       return
     }
-    const sessionID = props.sessionID
-      ? props.sessionID
-      : await (async () => {
-          const sessionID = await sdk.client.session.create({}).then((x) => x.data!.id)
-          return sessionID
-        })()
+    let sessionID: string | undefined = props.sessionID
+    const ensureSessionID = async (): Promise<string> => {
+      if (sessionID) return sessionID
+      sessionID = (await sdk.client.session.create({})).data!.id!
+      return sessionID
+    }
     const messageID = Identifier.ascending("message")
-    let inputText = store.prompt.input
+    let inputText = currentInput
 
     // Expand pasted text inline before submitting
     const allExtmarks = input.extmarks.getAllForTypeId(promptPartTypeId)
@@ -532,8 +711,9 @@ export function Prompt(props: PromptProps) {
     const variant = local.model.variant.current()
 
     if (store.mode === "shell") {
+      const resolvedSessionID = await ensureSessionID()
       sdk.client.session.shell({
-        sessionID,
+        sessionID: resolvedSessionID,
         agent: local.agent.current().name,
         model: {
           providerID: selectedModel.providerID,
@@ -551,8 +731,9 @@ export function Prompt(props: PromptProps) {
       })
     ) {
       let [command, ...args] = inputText.split(" ")
+      const resolvedSessionID = await ensureSessionID()
       sdk.client.session.command({
-        sessionID,
+        sessionID: resolvedSessionID,
         command: command.slice(1),
         arguments: args.join(" "),
         agent: local.agent.current().name,
@@ -561,8 +742,119 @@ export function Prompt(props: PromptProps) {
         variant,
       })
     } else {
+      if (disambiguationEnabled()) {
+        const analyzed = Disambiguation.analyze(inputText, {
+          maxBatch: disambiguationConfig().max_batch ?? 10,
+          maxCandidates: disambiguationConfig().max_candidates ?? 5,
+          lexicon: disambiguationConfig().lexicon,
+        })
+        if (debugInput) {
+          Log.Default.info("prompt.disambiguation.analyzed", {
+            kind: analyzed.kind,
+            candidates: (analyzed as any).candidates?.length,
+            slots: (analyzed as any).slots?.length,
+          })
+        }
+        if (analyzed.kind === "error") {
+          toast.show({
+            variant: "error",
+            message: `Batch limit exceeded: ${analyzed.count}/${analyzed.limit}`,
+            duration: 4000,
+          })
+        } else if (analyzed.kind === "batch_resolved") {
+          inputText = analyzed.resolvedLines.join("\n")
+        } else if (analyzed.kind === "none") {
+          inputText = analyzed.cleaned
+        } else {
+          if (debugInput) {
+            toast.show({
+              variant: "info",
+              message: `Disambiguation: press 1-${Math.min(
+                analyzed.candidates.length,
+                disambiguationConfig().max_candidates ?? 5,
+              )} or wait ${Math.round(disambiguationCountdownMs() / 1000)}s (esc cancel)`,
+              duration: Math.max(1500, disambiguationCountdownMs()),
+            })
+          }
+          const resolved = await DialogDisambiguate.show(dialog, analyzed, { countdownMs: disambiguationCountdownMs() })
+          if (resolved === null) return
+          inputText = resolved
+          if (debugInput) {
+            Log.Default.info("prompt.disambiguation.resolved", {
+              length: inputText.length,
+              preview: inputText.slice(0, 80),
+            })
+          }
+        }
+      }
+
+      if (rewriteEnabled() && Rewrite.shouldRewrite(inputText)) {
+        const cfg = rewriteConfig()
+        const original = inputText
+        const timeoutMs = cfg.timeout_ms ?? 1500
+        const temperature = cfg.temperature ?? 0
+        const maxTokens = cfg.max_tokens ?? 256
+
+        const result =
+          rewriteMode() === "external"
+            ? await Rewrite.rewrite(original, {
+                url: cfg.url,
+                model: cfg.model,
+                apiKey: rewriteApiKey(),
+                timeoutMs,
+                temperature,
+                maxTokens,
+              })
+            : await (async () => {
+                const url = new URL("/experimental/rewrite", sdk.url).toString()
+                const response = await fetch(url, {
+                  method: "POST",
+                  headers: {
+                    "content-type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    input: original,
+                    model: {
+                      providerID: selectedModel.providerID,
+                      modelID: selectedModel.modelID,
+                    },
+                    timeout_ms: timeoutMs,
+                    max_tokens: maxTokens,
+                    temperature,
+                  }),
+                })
+                if (!response.ok) {
+                  const preview = await response.text().catch(() => "")
+                  return { kind: "error", original, message: preview.slice(0, 200) } as const
+                }
+                const json = (await response.json().catch(() => undefined)) as any
+                const output = typeof json?.output === "string" ? json.output : ""
+                if (!output || output.trim() === original.trim()) return { kind: "unchanged", original, output: original } as const
+                return { kind: "rewritten", original, output } as const
+              })()
+
+        if (debugInput) {
+          Log.Default.info("prompt.rewrite.result", { kind: (result as any).kind, message: (result as any).message })
+        }
+
+        if (result.kind === "rewritten") {
+          if (rewritePreview()) {
+            const accepted = await DialogRewrite.show(
+              dialog,
+              { original: result.original, rewritten: result.output },
+              { countdownMs: rewriteCountdownMs() },
+            )
+            if (accepted === null) return
+            inputText = accepted
+          } else {
+            inputText = result.output
+          }
+        }
+      }
+
+      const resolvedSessionID = await ensureSessionID()
       sdk.client.session.prompt({
-        sessionID,
+        sessionID: resolvedSessionID,
         ...selectedModel,
         messageID,
         agent: local.agent.current().name,
@@ -598,7 +890,7 @@ export function Prompt(props: PromptProps) {
       setTimeout(() => {
         route.navigate({
           type: "session",
-          sessionID,
+          sessionID: sessionID!,
         })
       }, 50)
     input.clear()
@@ -688,6 +980,8 @@ export function Prompt(props: PromptProps) {
     return local.agent.color(local.agent.current().name)
   })
 
+  const canSend = createMemo(() => !props.disabled && store.prompt.input.trim().length > 0)
+
   const showVariant = createMemo(() => {
     const variants = local.model.variant.list()
     if (variants.length === 0) return false
@@ -763,12 +1057,27 @@ export function Prompt(props: PromptProps) {
               maxHeight={6}
               onContentChange={() => {
                 const value = input.plainText
+                if (debugInput) {
+                  Log.Default.info("prompt.content-change", { length: value.length })
+                }
                 setStore("prompt", "input", value)
                 autocomplete.onInput(value)
                 syncExtmarksWithPromptParts()
               }}
               keyBindings={textareaKeybindings()}
               onKeyDown={async (e) => {
+                if (debugInput) {
+                  Log.Default.info("prompt.keydown", {
+                    name: e.name,
+                    ctrl: e.ctrl,
+                    meta: e.meta,
+                    shift: e.shift,
+                    super: (e as any).super,
+                    cursorOffset: input.cursorOffset,
+                    length: input.plainText.length,
+                    focused: input.focused,
+                  })
+                }
                 if (props.disabled) {
                   e.preventDefault()
                   return
@@ -1069,6 +1378,23 @@ export function Prompt(props: PromptProps) {
                   </text>
                 </Match>
               </Switch>
+              <box
+                paddingLeft={1}
+                paddingRight={1}
+                backgroundColor={canSend() ? theme.primary : theme.backgroundElement}
+                onMouseUp={() => {
+                  if (!canSend()) return
+                  if (!input.focused) input.focus()
+                  submit()
+                }}
+              >
+                <text fg={canSend() ? theme.selectedListItemText : theme.textMuted}>
+                  send{" "}
+                  <span style={{ fg: canSend() ? theme.selectedListItemText : theme.textMuted }}>
+                    ({keybind.print("input_submit")})
+                  </span>
+                </text>
+              </box>
             </box>
           </Show>
         </box>

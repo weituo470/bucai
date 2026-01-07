@@ -560,7 +560,7 @@ export namespace Config {
       variant_cycle: z.string().optional().default("ctrl+t").describe("Cycle model variants"),
       input_clear: z.string().optional().default("ctrl+c").describe("Clear input field"),
       input_paste: z.string().optional().default("ctrl+v").describe("Paste from clipboard"),
-      input_submit: z.string().optional().default("return").describe("Submit input"),
+      input_submit: z.string().optional().default("return,alt+s").describe("Submit input"),
       input_newline: z
         .string()
         .optional()
@@ -926,6 +926,51 @@ export namespace Config {
           chatMaxRetries: z.number().optional().describe("Number of retries for chat completions on failure"),
           disable_paste_summary: z.boolean().optional(),
           batch_tool: z.boolean().optional().describe("Enable the batch tool"),
+          disambiguation: z
+            .object({
+              enabled: z.boolean().optional().describe("Enable ambiguity disambiguation for prompts"),
+              countdown_ms: z
+                .number()
+                .int()
+                .positive()
+                .optional()
+                .describe("Countdown in milliseconds before auto-selecting the default option"),
+              max_batch: z
+                .number()
+                .int()
+                .positive()
+                .optional()
+                .describe("Maximum number of lines to treat as a batch"),
+              max_candidates: z
+                .number()
+                .int()
+                .positive()
+                .optional()
+                .describe("Maximum number of candidates to generate and display"),
+              lexicon: z.any().optional().describe("Custom lexicon overrides for disambiguation"),
+              rewrite: z
+                .object({
+                  enabled: z.boolean().optional().describe("Enable model-based rewrite/normalization before sending prompts"),
+                  url: z
+                    .string()
+                    .optional()
+                    .describe("OpenAI-compatible base URL or full /v1/chat/completions endpoint for rewriting"),
+                  model: z.string().optional().describe("Model ID for rewriting"),
+                  api_key_env: z.string().optional().describe("Env var name containing API key for rewrite endpoint"),
+                  timeout_ms: z.number().int().positive().optional().describe("Rewrite request timeout in milliseconds"),
+                  max_tokens: z.number().int().positive().optional().describe("Max tokens for rewrite output"),
+                  temperature: z.number().min(0).max(2).optional().describe("Sampling temperature for rewrite model"),
+                  preview: z.boolean().optional().describe("Show confirmation dialog before applying rewrite"),
+                  countdown_ms: z
+                    .number()
+                    .int()
+                    .positive()
+                    .optional()
+                    .describe("Countdown in milliseconds before auto-accepting the rewrite"),
+                })
+                .optional(),
+            })
+            .optional(),
           openTelemetry: z
             .boolean()
             .optional()

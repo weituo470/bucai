@@ -5,6 +5,26 @@
   //   "url": "https://enterprise.dev.opencode.ai",
   // },
   "instructions": ["STYLE_GUIDE.md"],
+  "experimental": {
+    "disambiguation": {
+      // Model-based rewrite (punctuation/clarity) before sending prompts.
+      // Fill `url` + `model`, and set API key via env var (do NOT paste secrets here).
+      "rewrite": {
+        "enabled": false,
+        "url": "",
+        "model": "",
+        "api_key_env": "OPENCODE_REWRITE_API_KEY",
+        "timeout_ms": 1500,
+        "max_tokens": 256,
+        "temperature": 0,
+        "preview": false,
+        "countdown_ms": 3000,
+      },
+
+      // Optional: keep rule-based disambiguation off while you validate rewrite MVP.
+      "enabled": false,
+    },
+  },
   "provider": {
     "opencode": {
       "options": {},

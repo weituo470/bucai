@@ -1,4 +1,13 @@
 #!/bin/sh
+# Ensure bun is available in PATH (Git Bash on Windows may not include it)
+if ! command -v bun >/dev/null 2>&1; then
+  if [ -x "$HOME/.bun/bin/bun.exe" ]; then
+    export PATH="$HOME/.bun/bin:$PATH"
+  elif [ -x "$HOME/.bun/bin/bun" ]; then
+    export PATH="$HOME/.bun/bin:$PATH"
+  fi
+fi
+
 # Check if bun version matches package.json
 EXPECTED_VERSION=$(grep '"packageManager"' package.json | sed 's/.*"bun@\([^"]*\)".*/\1/')
 CURRENT_VERSION=$(bun --version)
